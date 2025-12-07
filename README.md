@@ -56,7 +56,7 @@ npm start
 ### 2. 서버 실행
 아래 명령어를 사용하여 서버를 실행할 수 있습니다.
 
-#### Python 서버 실행
+#### Python 서버 실행 / 아나콘다 가상환경 (requirements.txt 참조)
 ```bash
 cd server
 python ai_server.py
