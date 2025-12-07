@@ -1,28 +1,28 @@
-# ai_server.py
-# Python Flask AI 서버 (YOLOv8 + CSV DB)
-# 실행: python ai_server.py
+# ai_server_fastapi.py
+# Python FastAPI AI 서버 (YOLOv8 + CSV DB)
+# 실행: python ai_server_fastapi.py
 
 import torch
 import cv2
-from flask import Flask, request, jsonify
-from flask_cors import CORS
+from fastapi import FastAPI, HTTPException, Request
+from fastapi.middleware.cors import CORSMiddleware
+from pydantic import BaseModel
+from contextlib import asynccontextmanager
+import uvicorn
 import os
 import sys
 import csv
 from ultralytics import YOLO
 
-# --- 1. Flask 앱 설정 ---
-app = Flask(__name__)
-CORS(app) # 모든 출처 허용
-
-# --- 2. 설정 및 전역 변수 ---
+# --- 1. 설정 및 전역 변수 ---
 MODEL_PATH = 'best.pt'       # 학습된 YOLO 모델 파일
 CSV_PATH = 'food_list.csv'   # 영양 정보 데이터베이스
 
-model = None
-food_db = {} 
+# 전역 변수로 관리 (lifespan에서 초기화됨)
+ml_models = {}
+food_db = {}
 
-# --- 3. 데이터베이스 로드 함수 ---
+# --- 2. 데이터베이스 및 모델 로드 함수 ---
 def load_food_database(csv_file):
     """
     food_list.csv를 읽어서 ID를 키로 하는 상세 정보 딕셔너리를 만듭니다.
@@ -62,66 +62,94 @@ def load_food_database(csv_file):
     
     return database
 
-# --- 4. 초기화 (모델 및 DB 로드) ---
-print("\n" + "="*50)
-print("[AI 서버] 시스템 초기화 시작...")
+# --- 3. Lifespan (서버 시작/종료 시 실행될 로직) ---
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    print("\n" + "="*50)
+    print("[AI 서버] 시스템 초기화 시작...")
+    
+    # 1. 음식 DB 로드
+    db_data = load_food_database(CSV_PATH)
+    food_db.update(db_data)
 
-# 4-1. 음식 DB 로드
-food_db = load_food_database(CSV_PATH)
+    # 2. YOLO 모델 로드
+    try:
+        if os.path.exists(MODEL_PATH):
+            print(f"[AI 서버] YOLO 모델 로드 시도: {MODEL_PATH}")
+            ml_models["yolo"] = YOLO(MODEL_PATH)
+            print("[AI 서버] ✅ 모델 로드 성공")
+        else:
+            print(f"[AI 서버] ❌ 치명적 오류: 모델 파일을 찾을 수 없습니다 ({MODEL_PATH})")
+            print("   -> 프로젝트 폴더에 best.pt 파일이 있는지 확인해주세요.")
+    except Exception as e:
+        print(f"[AI 서버] ❌ 모델 로드 중 에러 발생: {e}")
+    
+    print("="*50 + "\n")
+    
+    yield # 서버가 실행되는 동안 대기
+    
+    # 서버 종료 시 정리할 작업이 있다면 여기에 작성
+    ml_models.clear()
+    food_db.clear()
+    print("[AI 서버] 시스템 종료 및 리소스 해제")
 
-# 4-2. YOLO 모델 로드
-try:
-    if os.path.exists(MODEL_PATH):
-        print(f"[AI 서버] YOLO 모델 로드 시도: {MODEL_PATH}")
-        model = YOLO(MODEL_PATH)
-        print("[AI 서버] ✅ 모델 로드 성공")
-    else:
-        print(f"[AI 서버] ❌ 치명적 오류: 모델 파일을 찾을 수 없습니다 ({MODEL_PATH})")
-        print("   -> 프로젝트 폴더에 best.pt 파일이 있는지 확인해주세요.")
-except Exception as e:
-    print(f"[AI 서버] ❌ 모델 로드 중 에러 발생: {e}")
+# --- 4. FastAPI 앱 설정 ---
+app = FastAPI(lifespan=lifespan)
 
-print("="*50 + "\n")
+# CORS 설정 (모든 출처 허용)
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
-# --- 5. API 엔드포인트 ---
+# --- 5. Pydantic 모델 (요청 데이터 검증용) ---
+class AnalyzeRequest(BaseModel):
+    image_path: str
 
-@app.route('/health', methods=['GET'])
-def health_check():
+# --- 6. API 엔드포인트 ---
+
+@app.get("/health")
+async def health_check():
     """서버 상태 및 모델 로드 여부 확인"""
-    return jsonify({
+    return {
         "status": "running",
-        "model_loaded": model is not None,
+        "model_loaded": "yolo" in ml_models,
         "db_loaded": len(food_db) > 0
-    })
+    }
 
-@app.route('/analyze', methods=['POST'])
-def analyze_image():
+@app.post("/analyze")
+async def analyze_image(request_data: AnalyzeRequest):
     """
     이미지 경로를 받아 예측 후, 영양 정보와 함께 결과를 반환
     요청 바디: { "image_path": "C:/.../uploads/user1/img.jpg" }
     """
-    if model is None:
-        return jsonify({"success": False, "error": "AI 모델이 로드되지 않았습니다."}), 500
+    # 모델 로드 확인
+    if "yolo" not in ml_models:
+        raise HTTPException(status_code=500, detail="AI 모델이 로드되지 않았습니다.")
+
+    image_path = request_data.image_path
+
+    # 이미지 경로 확인
+    if not image_path:
+        raise HTTPException(status_code=400, detail="image_path 파라미터가 없습니다.")
+
+    if not os.path.exists(image_path):
+        raise HTTPException(status_code=404, detail=f"이미지 파일을 찾을 수 없습니다: {image_path}")
 
     try:
-        # 1. 요청 데이터 파싱
-        data = request.json
-        image_path = data.get('image_path')
+        model = ml_models["yolo"]
         
-        if not image_path:
-            return jsonify({"success": False, "error": "image_path 파라미터가 없습니다."}), 400
-
-        if not os.path.exists(image_path):
-            return jsonify({"success": False, "error": f"이미지 파일을 찾을 수 없습니다: {image_path}"}), 404
-
-        # 2. YOLO 예측 실행
+        # 1. YOLO 예측 실행
         print(f"[AI 서버] 분석 요청 수신: {image_path}")
         # conf: 신뢰도 임계값 (0.25 이상만 검출)
         results = model.predict(image_path, save=False, conf=0.25, verbose=False)
         
         detections = []
         
-        # 3. 결과 파싱 및 DB 매칭
+        # 2. 결과 파싱 및 DB 매칭
         for result in results:
             for box in result.boxes:
                 cls_id = int(box.cls[0])
@@ -168,19 +196,20 @@ def analyze_image():
 
         print(f"[AI 서버] 분석 완료: {len(detections)}개 객체 검출됨")
 
-        # 4. 결과 반환
-        return jsonify({
+        # 3. 결과 반환
+        return {
             "success": True,
             "count": len(detections),
             "detections": detections,
             "image_path": image_path
-        })
+        }
 
     except Exception as e:
         print(f"[AI 서버] 분석 중 예외 발생: {e}")
-        return jsonify({"success": False, "error": str(e)}), 500
+        # FastAPI에서는 HTTPException을 사용하여 에러 응답을 보냅니다.
+        raise HTTPException(status_code=500, detail=str(e))
 
-# --- 6. 서버 실행 ---
+# --- 7. 서버 실행 ---
 if __name__ == '__main__':
-    # 호스트 0.0.0.0은 외부 접속 허용, 포트 5000
-    app.run(host='0.0.0.0', port=5000, debug=True)
+    # Uvicorn을 사용하여 서버 실행 (기존 Flask와 동일하게 5000번 포트 사용)
+    uvicorn.run(app, host="0.0.0.0", port=5000)
