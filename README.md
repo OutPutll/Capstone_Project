@@ -87,7 +87,7 @@ node server.js
 
 ---
 
-##어플리케이션 다운로드 링크
+## 어플리케이션 다운로드 링크
 
 https://drive.google.com/file/d/1QBfTdbYfip8z2gxKbheGzUAeGGp1eOZC/view?usp=sharing
 
