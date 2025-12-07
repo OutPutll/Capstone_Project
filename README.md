@@ -84,3 +84,11 @@ node server.js
 - Node.js
 - Python 3.x
 - Firebase 계정 및 설정
+
+---
+
+##어플리케이션 다운로드 링크
+
+https://drive.google.com/file/d/1QBfTdbYfip8z2gxKbheGzUAeGGp1eOZC/view?usp=sharing
+
+
